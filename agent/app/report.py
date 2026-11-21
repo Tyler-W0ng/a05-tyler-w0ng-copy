@@ -2,8 +2,11 @@
 import base64
 import hashlib
 import json
+import logging
 
 from app import clients, config
+
+log = logging.getLogger(__name__)
 
 
 def report(target: dict, note: dict, number: int, verdict: dict | None = None) -> dict:
@@ -28,7 +31,7 @@ def report(target: dict, note: dict, number: int, verdict: dict | None = None) -
             **{k: root[k] for k in ("source", "sink", "missing_check") if root.get(k)}},
         "evidence": [], "reproduction": {"steps": trigger.get("run_command", "Run the recorded trigger"),
             "expected": expect.get("regex", "observable output"),
-            "replay": {"context": "artifacts/replay", "expect": {f"{expect.get('stream','stderr')}_regex": expect.get("regex", "")}}},
+            "replay": {"context": "artifacts/observed.json", "expect": {f"{expect.get('stream','stderr')}_regex": expect.get("regex", "")}}},
         "impact": {"attacker": impact.get("attacker", "User able to provide input"),
             "preconditions": impact.get("preconditions", "The target processes the trigger."),
             "privileges": impact.get("privileges", "None"), "boundary": impact.get("boundary", "Input to target process"),
@@ -41,12 +44,26 @@ def report(target: dict, note: dict, number: int, verdict: dict | None = None) -
 
 async def write(local, target: dict, findings: list[dict], status="ok"):
     done = []
-    base = f"{target['id']}/"
+    base = f"items/{target['id']}/"
     for i, (note, verdict) in enumerate(findings[:config.MAX_FINDINGS], 1):
         document = report(target, note, i, verdict)
-        path = f"{base}findings/finding-{i:03d}/report.json"
+        folder = f"{base}findings/finding-{i:03d}/"
+        observed = json.dumps(note.get("observed", {}), indent=2).encode()
+        evidence_path = folder + "artifacts/observed.json"
+        await clients.call(local, "write_file", {"relpath": evidence_path,
+            "data_b64": base64.b64encode(observed).decode()})
+        document["evidence"].append({"kind":"other", "path": evidence_path.split("/findings/", 1)[1].split("/", 1)[1],
+            "sha256": hashlib.sha256(observed).hexdigest(), "description":"Trimmed dynamic execution output."})
+        poc = base64.b64decode(note.get("trigger", {}).get("stdin_b64", ""))
+        if poc:
+            poc_path = folder + "artifacts/poc.bin"
+            await clients.call(local, "write_file", {"relpath": poc_path, "data_b64": base64.b64encode(poc).decode()})
+            document["evidence"].append({"kind":"input", "path":poc_path.split("/findings/", 1)[1].split("/", 1)[1],
+                "sha256":hashlib.sha256(poc).hexdigest(), "description":"Standard input used for the observed run."})
+        path = folder + "report.json"
         await clients.call(local, "write_file", {"relpath": path, "data_b64": base64.b64encode((json.dumps(document, indent=2)+"\n").encode()).decode()})
         done.append({"id": document["id"], "state": document["validation"]["state"]})
     summary = {"id": target["id"], "status": status, "findings": done, "count": len(done)}
     await clients.call(local, "write_file", {"relpath": f"{base}summary.json", "data_b64": base64.b64encode((json.dumps(summary, indent=2)+"\n").encode()).decode()})
+    log.info("finalized %s: status=%s findings=%d", target["id"], status, len(done))
     return summary

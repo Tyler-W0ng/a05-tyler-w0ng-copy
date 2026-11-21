@@ -21,7 +21,7 @@ from app import config
 
 log = logging.getLogger(__name__)
 
-PROCESSORS = ("static_checkout", "scan_semgrep", "codeql_create_database", "codeql_analyze")
+PROCESSORS = ("static_checkout", "read_source", "scan_semgrep", "codeql_create_database", "codeql_analyze")
 DYNAMIC_TOOLS = ("dynamic_checkout", "dynamic_build", "dynamic_run", "dynamic_fuzz")
 
 

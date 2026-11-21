@@ -10,6 +10,10 @@ model while you build and a real one when you evaluate, without a rebuild.
 import os
 from pathlib import Path
 
+
+def _flag(name: str, default: str = "false") -> bool:
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
 # --- the model -------------------------------------------------------------
 # Note that there is no vendor name anywhere here. The agent knows a URL, a
 # key and a model name; the gateway knows what those mean.
@@ -42,10 +46,6 @@ TARGET_TIMEOUT = int(os.environ.get("TARGET_TIMEOUT", "3500"))
 # --- which optional parts of the platform exist ----------------------------
 # The stack runs in four modes (MODE in .env), and the agent is told which
 # parts exist the only way it is told anything: by its environment.
-def _flag(name: str, default: str = "false") -> bool:
-    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
-
-
 KB_ENABLED = _flag("KB_ENABLED")
 
 # --- the knowledge base: the pipeline's memory -----------------------------

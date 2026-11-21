@@ -119,6 +119,8 @@ def write_file(relpath: str, data_b64: str) -> dict:
     if not path.is_relative_to(root) or path == root:
         return {"error": "path must stay under output/"}
     data = base64.b64decode(data_b64)
+    if len(data) > MAX_WRITE:
+        return {"error": f"artifact is {len(data)} bytes; the limit is {MAX_WRITE}"}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return {"path": str(path.relative_to(root.parent)), "bytes": len(data)}

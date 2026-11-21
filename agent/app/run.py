@@ -99,11 +99,10 @@ async def _main(argv: list[str]) -> int:
     (config.OUTPUT_DIR / "run.json").write_text(json.dumps(run, indent=2) + "\n")
 
     print()
-    print(f"{'item':<18} {'kind':<8} {'source':<11} {'status':<7} summary")
+    print(f"{'target':<18} {'status':<10} findings")
     print("-" * 78)
     for d in done:
-        print(f"{d['id']:<18} {d['kind'] or '-':<8} {d['source'] or '-':<11} "
-              f"{d['status']:<7} {d['error'] or d['summary']}")
+        print(f"{d['id']:<18} {d['status']:<10} {d['count']}")
     print()
     if trace_url:
         print(f"  trace  {trace_url}")

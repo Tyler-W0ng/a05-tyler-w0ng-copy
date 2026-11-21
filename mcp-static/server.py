@@ -26,6 +26,7 @@ import hashlib
 import io
 import json
 import subprocess
+from pathlib import Path
 from typing import Literal
 
 from codeql_tools import create_database, analyze_database
@@ -49,6 +50,28 @@ MAX_BYTES = 8 * 1024 * 1024
 async def static_checkout(repository: str, commit: str) -> dict:
     """Fetch the exact target commit into this static MCP's private /tmp workspace."""
     return await asyncio.to_thread(checkout_source, repository, commit)
+
+
+@server.tool()
+def read_source(target_path: str, file: str, line_start: int, line_end: int | None = None) -> dict:
+    """Read at most 41 lines around a finding from a static checkout."""
+    root = Path(target_path).resolve()
+    if not root.is_relative_to(Path('/tmp/static-work')) or not root.is_dir():
+        return {"error": "target_path must be a static checkout"}
+    source = Path(file)
+    if not source.is_absolute():
+        source = root / source
+    source = source.resolve()
+    if not source.is_relative_to(root) or not source.is_file():
+        return {"error": "file must be inside the static checkout"}
+    if line_start < 1:
+        return {"error": "line_start must be positive"}
+    first = max(1, line_start - 20)
+    last = min(max(line_end or line_start, line_start) + 20, first + 40)
+    lines = source.read_text(errors="replace").splitlines()
+    return {"file": str(source.relative_to(root)), "line_start": first,
+            "line_end": min(last, len(lines)),
+            "text": "\n".join(f"{i}: {lines[i-1]}" for i in range(first, min(last, len(lines)) + 1))}
 
 
 def _decode(data: str) -> bytes | dict:

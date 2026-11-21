@@ -1,0 +1,416 @@
+{
+ "$schema": "https://json-schema.org/draft/2020-12/schema",
+ "$id": "https://cs279/finding.schema.json",
+ "title": "CS279 finding report (cs279-finding/1)",
+ "description": "See Assignments/FINDING_REPORT.md. Schema validity is necessary, not sufficient.",
+ "type": "object",
+ "properties": {
+  "schema_version": {
+   "const": "cs279-finding/1"
+  },
+  "id": {
+   "type": "string",
+   "pattern": "^finding-\\d{3,}$"
+  },
+  "target": {
+   "type": "object",
+   "properties": {
+    "repository": {
+     "type": "string",
+     "minLength": 1
+    },
+    "commit": {
+     "type": "string",
+     "pattern": "^[0-9a-f]{40}$"
+    },
+    "build": {
+     "type": "string",
+     "minLength": 1
+    },
+    "platform": {
+     "type": "string",
+     "minLength": 1
+    },
+    "configuration": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "repository",
+    "build"
+   ],
+   "description": "A05: repository URL and exact commit. A06: the target id as repository, and the commit from its input when given."
+  },
+  "finding": {
+   "type": "object",
+   "properties": {
+    "title": {
+     "type": "string",
+     "minLength": 1
+    },
+    "description": {
+     "type": "string",
+     "minLength": 1
+    },
+    "type": {
+     "type": "string",
+     "minLength": 1
+    },
+    "cwe": {
+     "type": "array",
+     "items": {
+      "type": "string",
+      "pattern": "^CWE-\\d+$"
+     }
+    },
+    "severity": {
+     "enum": [
+      "low",
+      "medium",
+      "high",
+      "critical",
+      "unknown"
+     ]
+    },
+    "confidence": {
+     "enum": [
+      "low",
+      "medium",
+      "high"
+     ]
+    }
+   },
+   "required": [
+    "title",
+    "description",
+    "type",
+    "cwe",
+    "severity",
+    "confidence"
+   ]
+  },
+  "location": {
+   "type": "array",
+   "minItems": 1,
+   "items": {
+    "type": "object",
+    "properties": {
+     "file": {
+      "type": "string",
+      "minLength": 1
+     },
+     "function": {
+      "type": "string"
+     },
+     "line_start": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "line_end": {
+      "type": "integer",
+      "minimum": 1
+     },
+     "component": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "file",
+     "line_start",
+     "line_end"
+    ]
+   }
+  },
+  "root_cause": {
+   "type": "object",
+   "properties": {
+    "input": {
+     "type": "string",
+     "minLength": 1
+    },
+    "source": {
+     "type": "string"
+    },
+    "sink": {
+     "type": "string"
+    },
+    "flow": {
+     "type": "string",
+     "minLength": 1
+    },
+    "missing_check": {
+     "type": "string"
+    },
+    "violated_property": {
+     "type": "string",
+     "minLength": 1
+    }
+   },
+   "required": [
+    "input",
+    "flow",
+    "violated_property"
+   ]
+  },
+  "evidence": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "properties": {
+     "kind": {
+      "enum": [
+       "sanitizer",
+       "valgrind",
+       "input",
+       "fuzzer",
+       "stack_trace",
+       "static_analysis",
+       "trace",
+       "assertion",
+       "debugger",
+       "source_excerpt",
+       "test",
+       "transcript",
+       "other"
+      ]
+     },
+     "path": {
+      "type": "string",
+      "pattern": "^(?!/)(?!.*\\.\\.).+"
+     },
+     "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+     },
+     "description": {
+      "type": "string",
+      "minLength": 1
+     }
+    },
+    "required": [
+     "kind",
+     "path",
+     "sha256",
+     "description"
+    ]
+   }
+  },
+  "reproduction": {
+   "type": "object",
+   "properties": {
+    "steps": {
+     "type": "string",
+     "minLength": 1
+    },
+    "expected": {
+     "type": "string",
+     "minLength": 1
+    },
+    "replay": {
+     "type": "object",
+     "properties": {
+      "context": {
+       "type": "string",
+       "pattern": "^(?!/)(?!.*\\.\\.).+"
+      },
+      "expect": {
+       "type": "object",
+       "properties": {
+        "exit_code": {
+         "anyOf": [
+          {
+           "type": "integer"
+          },
+          {
+           "const": "nonzero"
+          }
+         ]
+        },
+        "stdout_regex": {
+         "type": "string"
+        },
+        "stderr_regex": {
+         "type": "string"
+        }
+       },
+       "required": [],
+       "additionalProperties": false
+      }
+     },
+     "required": [
+      "context"
+     ]
+    }
+   },
+   "required": [
+    "steps",
+    "expected"
+   ]
+  },
+  "impact": {
+   "type": "object",
+   "properties": {
+    "attacker": {
+     "type": "string",
+     "minLength": 1
+    },
+    "preconditions": {
+     "type": "string",
+     "minLength": 1
+    },
+    "privileges": {
+     "type": "string",
+     "minLength": 1
+    },
+    "boundary": {
+     "type": "string",
+     "minLength": 1
+    },
+    "confidentiality": {
+     "enum": [
+      "none",
+      "low",
+      "high",
+      "unknown"
+     ]
+    },
+    "integrity": {
+     "enum": [
+      "none",
+      "low",
+      "high",
+      "unknown"
+     ]
+    },
+    "availability": {
+     "enum": [
+      "none",
+      "low",
+      "high",
+      "unknown"
+     ]
+    },
+    "consequences": {
+     "type": "string",
+     "minLength": 1
+    }
+   },
+   "required": [
+    "attacker",
+    "preconditions",
+    "privileges",
+    "boundary",
+    "confidentiality",
+    "integrity",
+    "availability",
+    "consequences"
+   ]
+  },
+  "validation": {
+   "type": "object",
+   "properties": {
+    "state": {
+     "enum": [
+      "candidate",
+      "reproducible",
+      "confirmed_bug",
+      "confirmed_vulnerability"
+     ]
+    },
+    "attempts": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "reproductions": {
+     "type": "integer",
+     "minimum": 0
+    },
+    "methods": {
+     "type": "array",
+     "items": {
+      "type": "string",
+      "minLength": 1
+     }
+    },
+    "false_positive_checks": {
+     "type": "string"
+    },
+    "independent": {
+     "type": "boolean"
+    }
+   },
+   "required": [
+    "state",
+    "attempts",
+    "reproductions",
+    "methods",
+    "independent"
+   ]
+  },
+  "logic": {
+   "anyOf": [
+    {
+     "type": "null"
+    },
+    {
+     "type": "object",
+     "properties": {
+      "rule": {
+       "type": "string",
+       "minLength": 1
+      },
+      "rule_text": {
+       "type": "string",
+       "minLength": 1
+      },
+      "spec_reference": {
+       "type": "string",
+       "minLength": 1
+      },
+      "initial_state": {
+       "type": "string",
+       "minLength": 1
+      },
+      "sequence": {
+       "type": "array",
+       "minItems": 1,
+       "items": {
+        "type": "string",
+        "minLength": 1
+       }
+      },
+      "expected": {
+       "type": "string",
+       "minLength": 1
+      },
+      "observed": {
+       "type": "string",
+       "minLength": 1
+      }
+     },
+     "required": [
+      "rule",
+      "rule_text",
+      "spec_reference",
+      "initial_state",
+      "sequence",
+      "expected",
+      "observed"
+     ]
+    }
+   ]
+  }
+ },
+ "required": [
+  "schema_version",
+  "id",
+  "target",
+  "finding",
+  "location",
+  "root_cause",
+  "evidence",
+  "reproduction",
+  "impact",
+  "validation"
+ ]
+}

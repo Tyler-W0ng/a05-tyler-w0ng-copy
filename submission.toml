@@ -1,0 +1,3 @@
+assignment = "A05"
+members = []   # GitHub usernames, e.g. ["octocat"]; never student IDs
+mode = "agent"  # the AgentLab MODE of the graded run: "agent", or "kb" for the knowledge base too

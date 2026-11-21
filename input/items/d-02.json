@@ -1,0 +1,10 @@
+{
+  "id": "d-02",
+  "repository": "https://github.com/cs279-f26/scoreboard",
+  "commit": "409a69051ffa4f13a13e87a42a191d612bb387d3",
+  "language": "c",
+  "build_hint": "make; make test; a libFuzzer harness is in fuzz/ (make fuzz CC=clang)",
+  "entry_points": [
+    "the command lines read on standard input"
+  ]
+}

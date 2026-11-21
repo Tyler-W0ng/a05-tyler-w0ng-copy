@@ -1,0 +1,10 @@
+{
+  "id": "d-06",
+  "repository": "https://github.com/cs279-f26/staticd",
+  "commit": "c9cbea90ff1c5e73d77562d26793ed45daace69d",
+  "language": "c",
+  "build_hint": "make; make test (from the repository root, serving www/)",
+  "entry_points": [
+    "the HTTP request read on standard input (inetd-style)"
+  ]
+}

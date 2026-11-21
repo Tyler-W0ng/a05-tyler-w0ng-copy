@@ -1,0 +1,10 @@
+{
+  "id": "d-01",
+  "repository": "https://github.com/cs279-f26/netdiag",
+  "commit": "e4ec3c3cbfb06d79ce7347760cfc522518d2881e",
+  "language": "c",
+  "build_hint": "make; tests in tests/run.sh (make test); PING needs iputils-ping at run time",
+  "entry_points": [
+    "the request lines read on standard input (PING, LOOKUP, CHECK)"
+  ]
+}

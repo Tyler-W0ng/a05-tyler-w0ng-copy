@@ -1,0 +1,10 @@
+{
+  "id": "d-03",
+  "repository": "https://github.com/cs279-f26/vault",
+  "commit": "93606f81b1e7183537072c564ac32e6daf28c18b",
+  "language": "c",
+  "build_hint": "make; make test; a libFuzzer harness is in fuzz/ (make fuzz CC=clang)",
+  "entry_points": [
+    "the command lines read on standard input, from an unauthenticated guest session"
+  ]
+}

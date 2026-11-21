@@ -1,0 +1,10 @@
+{
+  "id": "d-05",
+  "repository": "https://github.com/cs279-f26/notesdb",
+  "commit": "ca1115c73c5a04cb03b01098de839f574ad91f96",
+  "language": "c",
+  "build_hint": "make (needs libsqlite3-dev); make test",
+  "entry_points": [
+    "the command lines read on standard input, as an authenticated ordinary user (--user)"
+  ]
+}

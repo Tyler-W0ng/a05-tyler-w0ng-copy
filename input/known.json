@@ -1,0 +1,58 @@
+{
+ "d-01": [
+  {
+   "id": "netdiag-cmdi",
+   "file": "src/diag.c",
+   "function": "cmd_ping",
+   "line_start": 49,
+   "line_end": 68,
+   "cwe": "CWE-78",
+   "description": "PING passes the host to popen() through a shell command line. valid_host() (lines 14-24) rejects ; | & < > and blanks, but not $( ) or backticks, so PING $(cmd) or PING `cmd` runs arbitrary commands as the service user."
+  }
+ ],
+ "d-02": [
+  {
+   "id": "scoreboard-index",
+   "file": "src/board.c",
+   "function": "board_add",
+   "line_start": 39,
+   "line_end": 45,
+   "cwe": "CWE-129",
+   "description": "board_add() checks only slot >= nplayers, not slot < 0. SCORE <negative slot> <points> writes scores[slot] out of bounds (heap; CWE-787), and run_command() (src/commands.c:47) then reads names[slot] out of bounds. RENAME and board_rename() check both bounds."
+  }
+ ],
+ "d-03": [
+  {
+   "id": "vault-stack-role",
+   "file": "src/session.c",
+   "function": "login",
+   "line_start": 39,
+   "line_end": 52,
+   "cwe": "CWE-121",
+   "description": "login() copies the user name into the 32-byte session.user with next_word(..., MAX_LINE) (line 44), the line limit instead of sizeof user. The session lives on main()'s stack; a 33-35 byte name overwrites the adjacent role field after it was reset to ROLE_GUEST, without a PIN, so a guest gains admin (PRIVATE entries). Data-only: no control-flow hijack; names of 36 bytes or more also overflow past the struct (ASan stack-buffer-overflow)."
+  }
+ ],
+ "d-04": [
+  {
+   "id": "staticd-traversal",
+   "file": "src/http.c",
+   "function": "resolve",
+   "line_start": 68,
+   "line_end": 89,
+   "cwe": "CWE-22",
+   "description": "resolve() strips ../ segments (strip_dotdot, lines 57-65) before url_decode(), so percent-encoded dots (/%2e%2e/%2e%2e/etc/passwd) decode into ../ after the check and the request reads files outside the document root."
+  }
+ ],
+ "d-05": [
+  {
+   "id": "notesdb-sqli",
+   "file": "src/notes.c",
+   "function": "cmd_search",
+   "line_start": 145,
+   "line_end": 165,
+   "cwe": "CWE-89",
+   "description": "cmd_search() builds its query with sqlite3_mprintf, quoting the user with %q but inserting the search text with %s (line 156). SEARCH %' OR owner='bob' -- returns other users' private notes; every other command uses bound parameters."
+  }
+ ],
+ "d-06": []
+}

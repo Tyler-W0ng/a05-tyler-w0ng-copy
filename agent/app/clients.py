@@ -12,12 +12,14 @@ import json
 import logging
 import os
 import sys
+import time
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from mcp import Client, StdioServerParameters
 
 from app import config
+from app import trace
 
 log = logging.getLogger(__name__)
 
@@ -35,7 +37,14 @@ async def call(client: Client, tool: str, args: dict) -> dict:
     MCPServer sends a dict result as JSON text content (and sometimes as
     structured content too); accept either.
     """
-    result = await client.call_tool(tool, args)
+    started = time.monotonic()
+    trace.event(log, "mcp.call.start", tool=tool, arguments=args)
+    try:
+        result = await client.call_tool(tool, args)
+    except BaseException as exc:
+        trace.event(log, "mcp.call.exception", tool=tool, elapsed_seconds=round(time.monotonic() - started, 3),
+                    exception=type(exc).__name__, message=str(exc))
+        raise
     if result.structured_content is not None and isinstance(result.structured_content, dict):
         payload = result.structured_content
     else:
@@ -44,6 +53,9 @@ async def call(client: Client, tool: str, args: dict) -> dict:
             payload = json.loads(text) if text else {}
         except json.JSONDecodeError:
             payload = {"text": text}
+    trace.event(log, "mcp.call.response", tool=tool,
+                elapsed_seconds=round(time.monotonic() - started, 3),
+                is_error=result.is_error, result=payload)
     if result.is_error:
         raise ToolError(f"{tool}: {payload}")
     return payload

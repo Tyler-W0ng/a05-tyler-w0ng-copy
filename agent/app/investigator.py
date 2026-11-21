@@ -3,10 +3,12 @@ import base64
 import json
 import re
 import logging
+import time
 
 from langchain_openai import ChatOpenAI
 
 from app import clients, config
+from app import trace
 
 log = logging.getLogger(__name__)
 
@@ -38,11 +40,21 @@ NOTE_SCHEMA = {
 async def _ask(prompt: str) -> str:
     model = ChatOpenAI(model=config.MODEL, base_url=config.BASE_URL,
                        api_key=config.API_KEY, temperature=0)
-    log.info("MODEL INPUT BEGIN (%d chars)\n%s\nMODEL INPUT END", len(prompt), prompt)
-    response = await model.ainvoke(prompt)
+    started = time.monotonic()
+    trace.event(log, "model.request", model=config.MODEL, base_url=config.BASE_URL,
+                temperature=0, prompt_chars=len(prompt), prompt=prompt)
+    try:
+        response = await model.ainvoke(prompt)
+    except BaseException as exc:
+        trace.event(log, "model.exception", elapsed_seconds=round(time.monotonic() - started, 3),
+                    exception=type(exc).__name__, message=str(exc))
+        raise
     text = response.content if isinstance(response.content, str) else str(response.content)
     text = re.sub(r"^```(?:json)?|```$", "", text.strip())
-    log.info("MODEL OUTPUT BEGIN (%d chars)\n%s\nMODEL OUTPUT END", len(text), text)
+    trace.event(log, "model.response", elapsed_seconds=round(time.monotonic() - started, 3),
+                output_chars=len(text), output=text,
+                usage=getattr(response, "usage_metadata", None),
+                response_metadata=getattr(response, "response_metadata", None))
     return text
 
 
@@ -50,10 +62,12 @@ def _parse_candidates(text: str) -> list[dict]:
     """Find a candidate JSON object even when the model adds leading prose."""
     decoder = json.JSONDecoder()
     values = []
+    found_container = False
     stripped = text.lstrip()
     if stripped.startswith("["):
         try:
             values, _ = decoder.raw_decode(stripped)
+            found_container = isinstance(values, list)
         except json.JSONDecodeError:
             pass
     if not values:
@@ -66,8 +80,15 @@ def _parse_candidates(text: str) -> list[dict]:
                 continue
             if isinstance(value, dict) and isinstance(value.get("candidates"), list):
                 values = value["candidates"]
+                found_container = True
                 break
+    if not found_container:
+        trace.event(log, "model.candidates.parsed", json_container_found=False,
+                    candidate_count=0, valid_count=0, rejected_count=0)
+        return []
     if not values:
+        trace.event(log, "model.candidates.parsed", json_container_found=True,
+                    candidate_count=0, valid_count=0, rejected_count=0, candidates=[])
         return []
     required = NOTE_SCHEMA["required"]
     result = [item for item in values if isinstance(item, dict) and all(key in item for key in required)
@@ -78,6 +99,9 @@ def _parse_candidates(text: str) -> list[dict]:
         missing = [[key for key in required if key not in item]
                    for item in values if isinstance(item, dict)]
         log.warning("candidate JSON found but failed required fields: %s", missing[:5])
+    trace.event(log, "model.candidates.parsed", json_container_found=found_container,
+                candidate_count=len(values), valid_count=len(result), rejected_count=len(values) - len(result),
+                candidates=result)
     return result
 
 
@@ -100,6 +124,8 @@ def _summary(result: dict) -> dict:
 
 
 async def investigate(target: dict, leads: list[dict], dynamic, dynamic_path: str) -> list[dict]:
+    trace.event(log, "investigation.start", target=target, dynamic_path=dynamic_path,
+                lead_count=len(leads), leads=leads)
     # SARIF codeFlows can be very large. Keep only concise location, flow, and
     # source-context details needed to choose a test location and trigger.
     compact_leads = []
@@ -138,21 +164,22 @@ async def investigate(target: dict, leads: list[dict], dynamic, dynamic_path: st
     while len(prompt) > 18000 and compact_leads:
         compact_leads.pop()
         prompt = prompt.rsplit("Static findings: ", 1)[0] + "Static findings: " + json.dumps(compact_leads)
-    log.info("investigator prompt for %s: %d chars, %d compact leads", target.get("id"),
-             len(prompt), len(compact_leads))
+    trace.event(log, "investigator.prompt.ready", prompt_chars=len(prompt),
+                compact_lead_count=len(compact_leads), leads=compact_leads)
     candidates = await _candidate_reply(prompt, target.get("id", "target"))
     candidates = candidates[:config.MAX_CANDIDATES]
-    log.info("investigator received %d static leads and proposed %d candidates for %s",
-             len(leads), len(candidates), target.get("id"))
+    trace.event(log, "investigator.plan.complete", static_lead_count=len(leads),
+                candidate_count=len(candidates), candidates=candidates)
     build_command = target.get("build_hint", "make").split(";")[0].strip() or "make"
     build = await clients.call(dynamic, "dynamic_build", {
         "target_path": dynamic_path, "build_command": build_command, "timeout_seconds": 300})
     built = not build.get("error") and build.get("exit_code") == 0
-    log.info("dynamic build for %s: command=%s exit=%s error=%s", target.get("id"),
-             build_command, build.get("exit_code"), (build.get("error") or "")[:180])
+    trace.event(log, "dynamic.build.complete", command=build_command, result=build,
+                built=built)
     accepted = []
     refinements = 0
     for note in candidates:
+        trace.event(log, "candidate.start", candidate=note)
         for attempt in range(2):
             trigger = note.get("trigger", {})
             if not built:
@@ -168,9 +195,9 @@ async def investigate(target: dict, leads: list[dict], dynamic, dynamic_path: st
                 "target_path": dynamic_path, "command": run_command, "input_data": data})
             observed = run.get("stdout" if note.get("expect", {}).get("stream") == "stdout" else "stderr", "")
             fired = bool(re.search(note.get("expect", {}).get("regex", r"(?!)"), observed)) or run.get("sanitizer_report")
-            log.info("trigger for %s (%s): exit=%s fired=%s sanitizer=%s", target.get("id"),
-                     note.get("title", "candidate"), run.get("exit_code"), fired,
-                     run.get("sanitizer_report", False))
+            trace.event(log, "dynamic.trigger.complete", title=note.get("title", "candidate"),
+                        attempt=attempt + 1, command=run_command, stdin_b64=trigger.get("stdin_b64", ""),
+                        expected=note.get("expect", {}), result=run, fired=fired)
             if fired:
                 note["observed"] = _summary(run)
                 accepted.append(note)
@@ -178,6 +205,8 @@ async def investigate(target: dict, leads: list[dict], dynamic, dynamic_path: st
             if attempt or refinements >= config.MAX_REFINEMENTS:
                 break
             refinements += 1
+            trace.event(log, "candidate.refinement.start", refinement=refinements,
+                        candidate=note, previous_result=_summary(run))
             revision_prompt = ("You are refining one security test candidate after its first trigger did not produce "
                 "the expected observable. Return exactly one JSON object {\"candidates\":[one revised candidate]} "
                 "or {\"candidates\":[]} to give up. No prose. Follow this schema:\n" +
@@ -185,6 +214,11 @@ async def investigate(target: dict, leads: list[dict], dynamic, dynamic_path: st
                 "\nRun result:\n" + json.dumps(_summary(run)))
             revisions = await _candidate_reply(revision_prompt, target.get("id", "target"))
             if not revisions:
+                trace.event(log, "candidate.refinement.empty", refinement=refinements)
                 break
             note = revisions[0]
+            trace.event(log, "candidate.refinement.accepted", refinement=refinements,
+                        revised_candidate=note)
+    trace.event(log, "investigation.complete", accepted_count=len(accepted), accepted=accepted,
+                refinements=refinements)
     return accepted

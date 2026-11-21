@@ -21,6 +21,25 @@ bundled C/C++ suites or a selected query. CodeQL results include rule locations
 and available data-flow paths. The full SARIF report remains in the service's
 temporary workspace, so export anything needed after the container stops.
 
+With `STATIC_ENABLED=true` and `AGENT_ENABLED=true`, reconnaissance runs the
+security specialist using `PROMPTS["security"]`. The model receives the static
+checkout path and build command, calls Semgrep first, and can create and analyze
+a CodeQL database. Observed scanner findings feed the existing investigator;
+the model's summary is not used as a substitute for scanner output.
+The conversation, actual MCP tool calls, arguments, results, and runner errors
+are saved in `output/items/<target-id>/static-analysis.json`. A run with no
+Semgrep call records an explicit error. `AGENT_ENABLED=false` retains direct,
+model-free static scanning; `STATIC_ENABLED=false` skips static analysis.
+The bundled `mock-model` only supports the legacy processing tools, so use a
+model supporting tool calls for security analysis.
+
+Run the security-agent integration tests without external services:
+
+```bash
+cd agent
+.venv/bin/python -m unittest discover -s tests -v
+```
+
 The dynamic service provides `dynamic_checkout`, `dynamic_build` (Clang with
 AddressSanitizer and UndefinedBehaviorSanitizer), `dynamic_run` (bounded command
 and optional stdin), and `dynamic_fuzz` (bounded existing harness command).

@@ -11,7 +11,8 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END, START, StateGraph
 from mcp import Client
 
-from app import clients, config, investigator, report
+from app import clients, config, investigator, report, specialists
+from app import trace
 
 log = logging.getLogger(__name__)
 
@@ -56,25 +57,34 @@ class State(TypedDict, total=False):
 
 def build(local: Client, remote: Client, dynamic: Client, only: set[str] | None = None):
     async def list_targets(state):
+        trace.event(log, "node.start", node="list_targets", requested_only=sorted(only or []))
         ids = (await clients.call(local, "list_inputs", {}))["ids"]
         ids = [i for i in ids if i.endswith(".json") and (not only or i[:-5] in only)]
+        trace.event(log, "node.complete", node="list_targets", selected=ids[:config.MAX_ITEMS],
+                    max_items=config.MAX_ITEMS)
         return {"queue": ids[:config.MAX_ITEMS]}
 
     async def read_next(state):
         if not state.get("queue"):
             return {"target": None}
         filename, *rest = state["queue"]
+        trace.set_target(filename[:-5])
+        trace.event(log, "node.start", node="read_next", filename=filename, remaining_queue=rest)
         try:
             raw = await clients.call(local, "read_input", {"id": filename})
             target = json.loads(base64.b64decode(raw["data"]))
             target["id"] = target.get("id", filename[:-5])
             target["_deadline"] = time.monotonic() + config.TARGET_TIMEOUT
+            trace.event(log, "target.loaded", target=target, timeout_seconds=config.TARGET_TIMEOUT)
             return {"queue": rest, "target": target, "findings": [], "error": None}
         except Exception as exc:
+            trace.event(log, "target.load.exception", filename=filename,
+                        exception=type(exc).__name__, message=str(exc))
             return {"queue": rest, "target": {"id": filename[:-5]}, "findings": [], "error": str(exc)}
 
     async def recon(state):
         target = state["target"]
+        trace.event(log, "node.start", node="recon", target=target)
         if state.get("error"):
             return {"findings": [], "leads": []}
         static_path = dynamic_path = None
@@ -92,27 +102,47 @@ def build(local: Client, remote: Client, dynamic: Client, only: set[str] | None 
                      checkout.get("exit_code"), (checkout.get("error") or "")[:180])
             leads = []
             if config.STATIC_ENABLED and static_path:
-                sem = await clients.call(remote, "scan_semgrep", {"target_path": static_path})
-                sem_hits = sem.get("results", {}).get("results", [])
-                log.info("Semgrep %s: exit=%s hits=%d error=%s", target["id"], sem.get("exit_code"),
-                         len(sem_hits), (sem.get("error") or "")[:180])
-                for hit in sem_hits:
-                    extra, start = hit.get("extra", {}), hit.get("start", {})
-                    leads.append({"tool":"semgrep", "rule":hit.get("check_id"), "file":hit.get("path"),
-                        "line_start":start.get("line",1), "line_end":hit.get("end",{}).get("line", start.get("line",1)),
-                        "message":extra.get("message", ""), "excerpt":extra.get("lines", "")})
-                try:
-                    db = await clients.call(remote, "codeql_create_database", {"target_path":static_path,
-                        "build_command":target.get("build_hint", "make").split(";")[0], "timeout_seconds":240})
-                    log.info("CodeQL database %s: path=%s exit=%s error=%s", target["id"],
-                             db.get("database_path"), db.get("exit_code"), (db.get("error") or "")[:180])
-                    if db.get("database_path"):
-                        ql = await clients.call(remote, "codeql_analyze", {"database_path":db["database_path"], "timeout_seconds":240})
-                        log.info("CodeQL analysis %s: findings=%d exit=%s error=%s", target["id"],
-                                 len(ql.get("findings", [])), ql.get("exit_code"), (ql.get("error") or "")[:180])
-                        leads.extend(_codeql_leads(ql.get("findings", [])[:20]))
-                except Exception as exc:
-                    log.info("CodeQL skipped for %s: %s", target["id"], exc)
+                build_command = target.get("build_hint", "make").split(";")[0].strip() or "make"
+                if config.AGENT_ENABLED:
+                    analysis = await specialists.run_security(
+                        static_path, build_command, remote,
+                        timeout_seconds=max(0, target["_deadline"] - time.monotonic()))
+                    # Store observed calls/results, not just the model's claims.
+                    await clients.call(local, "write_file", {
+                        "relpath": f"items/{target['id']}/static-analysis.json",
+                        "data_b64": base64.b64encode(
+                            (json.dumps(analysis, indent=2) + "\n").encode()).decode(),
+                    })
+                    calls = analysis["tool_calls"]
+                    if analysis.get("error"):
+                        log.warning("security agent %s: %s", target["id"], analysis["error"])
+                else:
+                    # Preserve the model-free static baseline for ablation runs.
+                    calls = []
+                    await specialists._static_call(remote, "scan_semgrep", {
+                        "target_path": static_path}, calls)
+                    await specialists._static_call(remote, "codeql_create_database", {
+                        "target_path": static_path, "build_command": build_command,
+                        "timeout_seconds": 240}, calls)
+                    db = calls[-1]["result"]
+                    if not db.get("error") and db.get("exit_code") == 0 and db.get("database_path"):
+                        await specialists._static_call(remote, "codeql_analyze", {
+                            "database_path": db["database_path"], "timeout_seconds": 240}, calls)
+                for call in calls:
+                    result = call.get("result", {})
+                    if result.get("error") or result.get("exit_code") != 0:
+                        log.warning("static tool %s failed: %s", call["name"], result.get("error") or result.get("stderr"))
+                        continue
+                    if call["name"] == "scan_semgrep":
+                        sem_hits = result.get("results", {}).get("results", [])
+                        log.info("Semgrep %s: exit=%s hits=%d", target["id"], result["exit_code"], len(sem_hits))
+                        for hit in sem_hits:
+                            extra, start = hit.get("extra", {}), hit.get("start", {})
+                            leads.append({"tool": "semgrep", "rule": hit.get("check_id"), "file": hit.get("path"),
+                                "line_start": start.get("line", 1), "line_end": hit.get("end", {}).get("line", start.get("line", 1)),
+                                "message": extra.get("message", ""), "excerpt": extra.get("lines", "")})
+                    elif call["name"] == "codeql_analyze":
+                        leads.extend(_codeql_leads(result.get("findings", [])[:20]))
             # Attach bounded source context at the reported locations so the
             # investigator can inspect checks and surrounding control flow.
             for lead in leads[:15]:
@@ -127,12 +157,18 @@ def build(local: Client, remote: Client, dynamic: Client, only: set[str] | None 
                     lead["source_context"] = context.get("text", "")
                     lead["file"] = context.get("file", source_file)
                     lead.pop("path", None)
-            log.info("recon complete for %s: %d total leads", target["id"], len(leads))
+            trace.event(log, "recon.complete", static_path=static_path, dynamic_path=dynamic_path,
+                        lead_count=len(leads), leads=leads)
             return {"leads": leads[:40], "dynamic_path": dynamic_path}
         except Exception as exc:
+            trace.event(log, "recon.exception", exception=type(exc).__name__, message=str(exc),
+                        static_path=static_path, dynamic_path=dynamic_path)
             return {"leads": [], "dynamic_path": dynamic_path, "error": str(exc)}
 
     async def investigate_node(state):
+        trace.event(log, "node.start", node="investigate", target_id=state.get("target", {}).get("id"),
+                    error=state.get("error"), lead_count=len(state.get("leads", [])),
+                    dynamic_path=state.get("dynamic_path"))
         if state.get("error") or not config.AGENT_ENABLED or not state.get("dynamic_path"):
             return {"findings": []}
         remaining = state["target"]["_deadline"] - time.monotonic()
@@ -142,9 +178,11 @@ def build(local: Client, remote: Client, dynamic: Client, only: set[str] | None 
             found = await asyncio.wait_for(investigator.investigate(
                 state["target"], state.get("leads", []), dynamic, state["dynamic_path"]), remaining)
         except asyncio.TimeoutError:
+            trace.event(log, "investigation.timeout", remaining_seconds=remaining)
             return {"findings": [], "error": "timeout", "status": "timeout"}
         except Exception as exc:
-            log.warning("investigation failed for %s: %s", state["target"]["id"], exc)
+            log.exception("investigation failed for %s", state["target"]["id"])
+            trace.event(log, "investigation.exception", exception=type(exc).__name__, message=str(exc))
             found = []
         # Reproduction is owned by the separate deliverable. Without its service
         # wired in, discoveries remain candidates and cannot claim reproducibility.
@@ -171,6 +209,8 @@ def build(local: Client, remote: Client, dynamic: Client, only: set[str] | None 
         target = state["target"]
         if not target:
             return {}
+        trace.event(log, "node.start", node="finalize", target_id=target.get("id"),
+                    status=state.get("status"), error=state.get("error"), findings=state.get("findings", []))
         if not target.get("repository"):
             summary = {"id": target["id"], "status": "failed", "findings": [], "count": 0,
                        "error": state.get("error", "unreadable target spec")}

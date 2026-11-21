@@ -62,6 +62,9 @@ services:
       mcp:
         condition: service_healthy
         required: false
+      mcp-dynamic:
+        condition: service_healthy
+        required: false
       kb:
         condition: service_healthy
         required: false
@@ -76,9 +79,16 @@ services:
       AGENT_MODEL: ${AGENT_MODEL:-mock-model}
       AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-12}
       AGENT_MAX_ITEMS: ${AGENT_MAX_ITEMS:-100}
+      STATIC_ENABLED: ${STATIC_ENABLED:-true}
+      AGENT_ENABLED: ${AGENT_ENABLED:-true}
+      MAX_CANDIDATES: ${MAX_CANDIDATES:-5}
+      MAX_REFINEMENTS: ${MAX_REFINEMENTS:-4}
+      MAX_FINDINGS: ${MAX_FINDINGS:-10}
+      TARGET_TIMEOUT: ${TARGET_TIMEOUT:-3500}
       AGENT_LOG_LEVEL: ${AGENT_LOG_LEVEL:-INFO}
 
       MCP_URL: http://mcp:8000/mcp
+      DYNAMIC_MCP_URL: http://mcp-dynamic:8001/mcp
 
       # Optional parts. false / empty means "this mode does not run it".
       KB_ENABLED: ${KB_ENABLED:-false}

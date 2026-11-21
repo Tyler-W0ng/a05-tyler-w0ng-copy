@@ -29,6 +29,13 @@ LOG_LEVEL = os.environ.get("AGENT_LOG_LEVEL", "INFO").upper()
 # --- the tool servers ------------------------------------------------------
 # Remote: the processing server, in its own container, over Streamable HTTP.
 MCP_URL = os.environ.get("MCP_URL", "http://mcp:8000/mcp").strip()
+DYNAMIC_MCP_URL = os.environ.get("DYNAMIC_MCP_URL", "http://mcp-dynamic:8001/mcp").strip()
+STATIC_ENABLED = _flag("STATIC_ENABLED", "true")
+AGENT_ENABLED = _flag("AGENT_ENABLED", "true")
+MAX_CANDIDATES = int(os.environ.get("MAX_CANDIDATES", "5"))
+MAX_REFINEMENTS = int(os.environ.get("MAX_REFINEMENTS", "4"))
+MAX_FINDINGS = int(os.environ.get("MAX_FINDINGS", "10"))
+TARGET_TIMEOUT = int(os.environ.get("TARGET_TIMEOUT", "3500"))
 # Local: the I/O server, a subprocess of this one, over stdio (app/io_server.py).
 
 

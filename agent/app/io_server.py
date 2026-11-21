@@ -9,6 +9,7 @@ three operations, all by ID:
     list_inputs()               the IDs of the items waiting in input/items/
     read_input(id)              one item's bytes, base64-encoded
     write_output(id, content)   write the result for one ID to output/items/
+    write_file(relpath, data_b64) write a binary-safe file below output/
 
 An ID is a file name and nothing more: letters, digits, `.`, `_`, `-`, no
 slashes, no leading dot. It is checked by pattern *and* by resolving the path
@@ -108,6 +109,19 @@ def write_output(id: str, content: str) -> dict:
     tmp.write_bytes(data)
     tmp.replace(path)
     return {"id": id, "path": f"output/items/{path.name}", "bytes": len(data)}
+
+
+@server.tool()
+def write_file(relpath: str, data_b64: str) -> dict:
+    """Write a binary-safe artifact under output/."""
+    root = ITEMS_OUT.parent.resolve()
+    path = (root / relpath).resolve()
+    if not path.is_relative_to(root) or path == root:
+        return {"error": "path must stay under output/"}
+    data = base64.b64decode(data_b64)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(data)
+    return {"path": str(path.relative_to(root.parent)), "bytes": len(data)}
 
 
 if __name__ == "__main__":

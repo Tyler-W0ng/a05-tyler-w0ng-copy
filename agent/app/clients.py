@@ -21,8 +21,8 @@ from app import config
 
 log = logging.getLogger(__name__)
 
-PROCESSORS = ("scan_semgrep", "codeql_create_database", "codeql_analyze",
-              "process_text", "process_image", "process_binary")
+PROCESSORS = ("static_checkout", "scan_semgrep", "codeql_create_database", "codeql_analyze")
+DYNAMIC_TOOLS = ("dynamic_checkout", "dynamic_build", "dynamic_run", "dynamic_fuzz")
 
 
 class ToolError(RuntimeError):
@@ -72,13 +72,16 @@ async def connect():
             Client(local_params, read_timeout_seconds=30))
         remote = await stack.enter_async_context(
             Client(config.MCP_URL, read_timeout_seconds=960))
+        dynamic = await stack.enter_async_context(
+            Client(config.DYNAMIC_MCP_URL, read_timeout_seconds=960))
 
         for name, client, needed in (
-                ("local io", local, ("list_inputs", "read_input", "write_output")),
-                (config.MCP_URL, remote, PROCESSORS)):
+                ("local io", local, ("list_inputs", "read_input", "write_output", "write_file")),
+                (config.MCP_URL, remote, PROCESSORS),
+                (config.DYNAMIC_MCP_URL, dynamic, DYNAMIC_TOOLS)):
             offered = {t.name for t in (await client.list_tools()).tools}
             missing = set(needed) - offered
             if missing:
                 raise RuntimeError(f"{name} does not offer {sorted(missing)}")
             log.info("mcp: %s offers %s", name, ", ".join(sorted(offered)))
-        yield local, remote
+        yield local, remote, dynamic

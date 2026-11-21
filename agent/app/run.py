@@ -62,8 +62,8 @@ async def _main(argv: list[str]) -> int:
     started = time.monotonic()
     trace_id = None
     try:
-        async with clients.connect() as (local, remote):
-            pipeline = graph.build(local, remote, set(argv) or None)
+        async with clients.connect() as (local, remote, dynamic):
+            pipeline = graph.build(local, remote, dynamic, set(argv) or None)
             run_config = {
                 "recursion_limit": graph.recursion_limit(),
                 "callbacks": [handler] if handler else [],

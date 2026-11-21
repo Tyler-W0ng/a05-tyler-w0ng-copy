@@ -1,224 +1,136 @@
-"""The pipeline: a LangGraph state machine that processes input/ one item at a time.
-
-    START -> list_inputs -> read_next --(none left)--> END
-                               |   ^
-                     (unreadable)  |
-                               |   +------------------------------- write
-                               v                                      ^
-                            classify -> recall --(remembered)---------+
-                                           |                          |
-                         (by kind)  text_agent | image_agent | binary_agent
-                                           |                          |
-                                           +--------> remember -------+
-
-Who decides what, which is the point of drawing it:
-
-  * the GRAPH decides the order, the routing and the output ID. classify is
-    plain code over magic numbers; the conditional edges read its answer;
-    write_output always uses the input's own ID. None of that is negotiable
-    by a model or by the content of a file.
-  * the SPECIALISTS decide how to process one item - an LLM agent each, with
-    one tool (app/specialists.py).
-  * the MCP SERVERS do the work: the local one (stdio) reads and writes, the
-    remote one (HTTP, in its own container) measures and hashes.
-
-The item's bytes are not in the graph state. State carries the item's ID,
-size, hash and kind; the bytes sit in `blobs` below, one item at a time. That
-keeps base64 out of every checkpoint and every trace, and it is the same rule
-the specialists follow: pass references, not payloads.
-"""
-
+"""Deterministic target loop; MCP servers perform checkout and analysis."""
 import base64
-import hashlib
 import json
 import logging
 import operator
-from typing import Annotated, Any, TypedDict
+from typing import Annotated, TypedDict
 
-from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from mcp import Client
 
-from app import classify as classifier
-from app import clients, kb, specialists
-from app import config as settings
+from app import clients, config, investigator, report
 
 log = logging.getLogger(__name__)
 
-AGENTS = {"text": "text_agent", "image": "image_agent", "binary": "binary_agent"}
-
-# Graph steps per item: read_next, classify, recall, agent, remember, write.
-STEPS_PER_ITEM = 6
-
-
-class Item(TypedDict, total=False):
-    id: str
-    bytes: int
-    sha256: str
-    kind: str
-
 
 class State(TypedDict, total=False):
-    queue: list[str]                 # IDs still to process
-    item: Item | None                # the one in hand
-    result: dict | None              # what the tool found
-    summary: str | None              # what the specialist said about it
-    source: str | None               # "specialist" | "memory" | "error"
+    queue: list[str]
+    target: dict | None
+    findings: list
     error: str | None
-    transcript: list[dict]           # the specialist's conversation
-    done: Annotated[list[dict], operator.add]   # one line per finished item
+    done: Annotated[list[dict], operator.add]
 
 
-def recursion_limit() -> int:
-    """The graph-level bound, derived from the item cap - see config.MAX_ITEMS."""
-    return STEPS_PER_ITEM * settings.MAX_ITEMS + 10
-
-
-def build(local: Client, remote: Client, only: set[str] | None = None):
-    blobs: dict[str, bytes] = {}
-
-    # --- I/O, through the local MCP server --------------------------------
-
-    async def list_inputs(state: State) -> dict:
+def build(local: Client, remote: Client, dynamic: Client, only: set[str] | None = None):
+    async def list_targets(state):
         ids = (await clients.call(local, "list_inputs", {}))["ids"]
-        if only:
-            missing = only - set(ids)
-            if missing:
-                log.warning("no such input: %s", ", ".join(sorted(missing)))
-            ids = [i for i in ids if i in only]
-        if len(ids) > settings.MAX_ITEMS:
-            log.warning("%d items; processing the first %d (AGENT_MAX_ITEMS)",
-                        len(ids), settings.MAX_ITEMS)
-            ids = ids[:settings.MAX_ITEMS]
-        log.info("inputs: %s", ", ".join(ids) or "none")
-        return {"queue": ids}
+        ids = [i for i in ids if i.endswith(".json") and (not only or i[:-5] in only)]
+        return {"queue": ids[:config.MAX_ITEMS]}
 
-    async def read_next(state: State) -> dict:
-        blobs.clear()                    # one item's bytes in memory at a time
-        queue = state.get("queue") or []
-        if not queue:
-            return {"item": None}
-        item_id, rest = queue[0], queue[1:]
-        fresh = {"queue": rest, "result": None, "summary": None, "source": None,
-                 "error": None, "transcript": []}
-        reply = await clients.call(local, "read_input", {"id": item_id})
-        if "error" in reply:
-            return {**fresh, "source": "error", "error": reply["error"],
-                    "item": {"id": item_id, "bytes": 0, "sha256": "", "kind": "unreadable"}}
-        data = base64.b64decode(reply["data"])
-        blobs[item_id] = data
-        return {**fresh, "item": {"id": item_id, "bytes": len(data),
-                                  "sha256": hashlib.sha256(data).hexdigest()}}
+    async def read_next(state):
+        if not state.get("queue"):
+            return {"target": None}
+        filename, *rest = state["queue"]
+        try:
+            raw = await clients.call(local, "read_input", {"id": filename})
+            target = json.loads(base64.b64decode(raw["data"]))
+            target["id"] = target.get("id", filename[:-5])
+            return {"queue": rest, "target": target, "findings": [], "error": None}
+        except Exception as exc:
+            return {"queue": rest, "target": {"id": filename[:-5]}, "findings": [], "error": str(exc)}
 
-    async def write(state: State) -> dict:
-        item, result = state["item"], state.get("result")
-        error = state.get("error") or (result or {}).get("error")
-        record = {
-            "id": item["id"],
-            "kind": item.get("kind"),
-            "bytes": item.get("bytes"),
-            "sha256": item.get("sha256"),
-            "source": state.get("source"),
-            "status": "error" if error else "ok",
-            "result": result,
-            "summary": state.get("summary"),
-            "error": error,
-            "model": settings.MODEL if state.get("source") == "specialist" else None,
-            "transcript": state.get("transcript") or [],
-        }
-        reply = await clients.call(local, "write_output",
-                                   {"id": item["id"], "content": json.dumps(record, indent=2)})
-        if "error" in reply:
-            record.update(status="error", error=f"write failed: {reply['error']}")
-        log.info("item %-16s %-7s %-10s %s", item["id"], item.get("kind"),
-                 record["source"], record["error"] or record["summary"])
-        return {"done": [{k: record[k] for k in
-                          ("id", "kind", "source", "status", "summary", "error")}]}
+    async def recon(state):
+        target = state["target"]
+        if state.get("error"):
+            return {"findings": [], "leads": []}
+        static_path = dynamic_path = None
+        try:
+            if config.STATIC_ENABLED:
+                checkout = await clients.call(remote, "static_checkout", {"repository": target["repository"], "commit": target["commit"]})
+                static_path = checkout.get("target_path")
+            checkout = await clients.call(dynamic, "dynamic_checkout", {"repository": target["repository"], "commit": target["commit"]})
+            dynamic_path = checkout.get("target_path")
+            leads = []
+            if config.STATIC_ENABLED and static_path:
+                sem = await clients.call(remote, "scan_semgrep", {"target_path": static_path})
+                for hit in sem.get("results", {}).get("results", []):
+                    extra, start = hit.get("extra", {}), hit.get("start", {})
+                    leads.append({"tool":"semgrep", "rule":hit.get("check_id"), "file":hit.get("path"),
+                        "line_start":start.get("line",1), "line_end":hit.get("end",{}).get("line", start.get("line",1)),
+                        "message":extra.get("message", ""), "excerpt":extra.get("lines", "")})
+                try:
+                    db = await clients.call(remote, "codeql_create_database", {"target_path":static_path,
+                        "build_command":target.get("build_hint", "make").split(";")[0], "timeout_seconds":240})
+                    if db.get("database_path"):
+                        ql = await clients.call(remote, "codeql_analyze", {"database_path":db["database_path"], "timeout_seconds":240})
+                        leads.extend(ql.get("findings", [])[:20])
+                except Exception as exc:
+                    log.info("CodeQL skipped for %s: %s", target["id"], exc)
+            return {"leads": leads[:40], "dynamic_path": dynamic_path}
+        except Exception as exc:
+            return {"leads": [], "dynamic_path": dynamic_path, "error": str(exc)}
 
-    # --- routing: plain code, not a model ---------------------------------
+    async def investigate_node(state):
+        if state.get("error") or not config.AGENT_ENABLED or not state.get("dynamic_path"):
+            return {"findings": []}
+        found = await investigator.investigate(state["target"], state.get("leads", []), dynamic, state["dynamic_path"])
+        # Reproduction is owned by the separate deliverable. Without its service
+        # wired in, discoveries remain candidates and cannot claim reproducibility.
+        return {"findings": [(note, {"state":"candidate", "attempts":1, "reproductions":0,
+                                      "independent":False, "methods":["dynamic_run"]}) for note in found]}
 
-    def classify(state: State) -> dict:
-        item = state["item"]
-        return {"item": {**item, "kind": classifier.classify(blobs[item["id"]])}}
+    async def warnings_to_findings(state):
+        return {"findings": [(dict(title=x.get("rule", "Static warning"), description=x.get("message", ""),
+            type="static analysis warning", cwe=[], severity="unknown", confidence="low", file=x.get("file", "unknown"),
+            line_start=x.get("line_start", 1), line_end=x.get("line_end", x.get("line_start", 1)),
+            root_cause={"input":"Unknown", "flow":x.get("message", "Static warning"), "violated_property":"Requires validation"},
+            impact={}, trigger={}, expect={}), {"state":"candidate", "attempts":0, "reproductions":0,
+            "independent":False, "methods":["static_analysis"]}) for x in state.get("leads", [])]}
 
-    # --- memory, when there is a knowledge base ---------------------------
+    def dedup(state):
+        best = {}
+        for item in state.get("findings", []):
+            note = item[0]
+            key = (note.get("type"), note.get("file"), note.get("function"))
+            best.setdefault(key, item)
+        return {"findings": list(best.values())[:config.MAX_FINDINGS]}
 
-    async def recall(state: State) -> dict:
-        if not settings.KB_ENABLED:
+    async def finalize(state):
+        target = state["target"]
+        if not target:
             return {}
-        item = state["item"]
-        hit = await kb.recall(item["sha256"])
-        if hit is None or hit["kind"] != item["kind"]:
-            return {}
-        return {"result": hit["result"], "summary": hit["summary"], "source": "memory"}
+        if not target.get("repository"):
+            summary = {"id": target["id"], "status": "failed", "findings": [], "count": 0,
+                       "error": state.get("error", "unreadable target spec")}
+            await clients.call(local, "write_file", {"relpath": f"{target['id']}/summary.json",
+                "data_b64": base64.b64encode((json.dumps(summary, indent=2)+"\n").encode()).decode()})
+            return {"done": [summary]}
+        result = await report.write(local, target, state.get("findings", []), "failed" if state.get("error") else "ok")
+        return {"done":[result]}
 
-    async def remember(state: State) -> dict:
-        result = state.get("result")
-        if (settings.KB_ENABLED and state.get("source") == "specialist"
-                and result and "error" not in result):
-            item = state["item"]
-            await kb.remember(item["sha256"], item["kind"], result,
-                              state.get("summary") or "", item["id"])
-        return {}
-
-    # --- the specialists --------------------------------------------------
-
-    def specialist(kind: str):
-        # `config` is LangGraph's per-call config - callbacks included - and
-        # passing it on is what puts the specialist's trace inside this one.
-        async def node(state: State, config: RunnableConfig) -> dict:
-            item = state["item"]
-            try:
-                out = await specialists.run(kind, item, blobs[item["id"]],
-                                            remote, config)
-            except Exception as exc:              # noqa: BLE001
-                # One item failing must not take the batch down, and must not
-                # vanish: it is written out with its error, like any other.
-                # One line here; the traceback only at AGENT_LOG_LEVEL=DEBUG.
-                log.error("item %s: %s specialist failed: %s: %s", item["id"], kind,
-                          type(exc).__name__, str(exc)[:160])
-                log.debug("traceback", exc_info=True)
-                return {"source": "error", "error": f"{type(exc).__name__}: {exc}"}
-            return {"result": out["result"], "summary": out["summary"],
-                    "transcript": out["transcript"], "source": "specialist",
-                    "error": None if out["result"] is not None
-                    else "the specialist never called its tool"}
-        node.__name__ = AGENTS[kind]
-        return node
-
-    # --- the wiring -------------------------------------------------------
-
-    def after_read(state: State) -> str:
-        if state.get("item") is None:
+    def route(state):
+        if state.get("target") is None:
             return END
-        return "write" if state.get("source") == "error" else "classify"
-
-    def after_recall(state: State) -> str:
-        return "write" if state.get("source") == "memory" \
-            else AGENTS[state["item"]["kind"]]
+        if not config.AGENT_ENABLED:
+            return "warnings_to_findings"
+        return "investigate"
 
     graph = StateGraph(State)
-    graph.add_node("list_inputs", list_inputs)
-    graph.add_node("read_next", read_next)
-    graph.add_node("classify", classify)
-    graph.add_node("recall", recall)
-    for kind, name in AGENTS.items():
-        graph.add_node(name, specialist(kind))
-    graph.add_node("remember", remember)
-    graph.add_node("write", write)
-
-    graph.add_edge(START, "list_inputs")
-    graph.add_edge("list_inputs", "read_next")
-    graph.add_conditional_edges("read_next", after_read, [END, "write", "classify"])
-    graph.add_edge("classify", "recall")
-    graph.add_conditional_edges("recall", after_recall, ["write", *AGENTS.values()])
-    for name in AGENTS.values():
-        graph.add_edge(name, "remember")
-    graph.add_edge("remember", "write")
-    graph.add_edge("write", "read_next")
+    for name, fn in (("list_targets",list_targets),("read_next",read_next),("recon",recon),
+                     ("investigate",investigate_node),("warnings_to_findings",warnings_to_findings),
+                     ("dedup",dedup),("finalize",finalize)):
+        graph.add_node(name, fn)
+    graph.add_edge(START,"list_targets"); graph.add_edge("list_targets","read_next")
+    graph.add_conditional_edges("read_next", lambda s: END if s.get("target") is None else "recon", [END,"recon"])
+    graph.add_conditional_edges("recon", route, ["investigate","warnings_to_findings",END])
+    graph.add_edge("investigate","dedup"); graph.add_edge("warnings_to_findings","finalize")
+    graph.add_edge("dedup","finalize"); graph.add_edge("finalize","read_next")
     return graph.compile(name="pipeline")
 
 
-def summarise(done: list[dict[str, Any]]) -> str:
-    """One line per item, for the trace's output and the terminal."""
-    return "\n".join(f"{d['id']}: {d['error'] or d['summary']}" for d in done)
+def recursion_limit():
+    return max(100, config.MAX_ITEMS * 10)
+
+
+def summarise(done):
+    return "\n".join(f"{x['id']}: {x['status']} ({x['count']} findings)" for x in done)
